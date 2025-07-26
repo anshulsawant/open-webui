@@ -58,6 +58,10 @@ from ssl import CERT_NONE, CERT_REQUIRED, PROTOCOL_TLS
 from ldap3 import Server, Connection, NONE, Tls
 from ldap3.utils.conv import escape_filter_chars
 
+# WeidSyntara: Import the custom tool loader
+from weidsyntara.tool_loader import load_local_tools
+
+
 router = APIRouter()
 
 log = logging.getLogger(__name__)
@@ -382,6 +386,15 @@ async def ldap_auth(request: Request, response: Response, form_data: LdapForm):
             user = Auths.authenticate_user_by_email(email)
 
             if user:
+                # =================== WeidSyntara Tool Sync (LDAP) ===================
+                log.info(f"WeidSyntara: LDAP user '{user.email}' logged in. Synchronizing custom tools...")
+                try:
+                    load_local_tools(request.app)
+                    log.info("WeidSyntara: Custom tool synchronization complete.")
+                except Exception as e:
+                    log.error(f"WeidSyntara: An error occurred during tool synchronization: {e}")
+                # ================= End WeidSyntara Tool Sync =================
+
                 expires_delta = parse_duration(request.app.state.config.JWT_EXPIRES_IN)
                 expires_at = None
                 if expires_delta:
@@ -503,7 +516,15 @@ async def signin(request: Request, response: Response, form_data: SigninForm):
         user = Auths.authenticate_user(form_data.email.lower(), form_data.password)
 
     if user:
-
+        # =================== WeidSyntara Tool Sync (Standard) ===================
+        log.info(f"WeidSyntara: User '{user.email}' logged in. Synchronizing custom tools...")
+        try:
+            load_local_tools(request.app)
+            log.info("WeidSyntara: Custom tool synchronization complete.")
+        except Exception as e:
+            log.error(f"WeidSyntara: An error occurred during tool synchronization: {e}")
+        # ================= End WeidSyntara Tool Sync =================
+        
         expires_delta = parse_duration(request.app.state.config.JWT_EXPIRES_IN)
         expires_at = None
         if expires_delta:
