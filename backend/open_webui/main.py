@@ -6,7 +6,7 @@ import mimetypes
 import os
 import shutil
 import sys
-import time
+import time # Added this import for use in tool_loader.py
 import random
 from uuid import uuid4
 
@@ -440,11 +440,11 @@ from open_webui.utils.embeddings import generate_embeddings
 from open_webui.utils.middleware import process_chat_payload, process_chat_response
 from open_webui.utils.access_control import has_access
 
-from open_webui.utils.auth import (
+from open_webui.utils.auth import ( # Ensure get_admin_user is imported here
     get_license_data,
     get_http_authorization_cred,
     decode_token,
-    get_admin_user,
+    get_admin_user, # Make sure get_admin_user is explicitly imported from this location
     get_verified_user,
 )
 from open_webui.utils.plugin import install_tool_and_function_dependencies
@@ -460,6 +460,9 @@ from open_webui.tasks import (
 )  # Import from tasks.py
 
 from open_webui.utils.redis import get_sentinels_from_env
+
+# WeidSyntara: Import the custom tool loader
+from weidsyntara.tool_loader import load_local_tools
 
 
 if SAFE_MODE:
@@ -518,6 +521,28 @@ async def lifespan(app: FastAPI):
     # when the first user lands on the / route.
     log.info("Installing external dependencies of functions and tools...")
     install_tool_and_function_dependencies()
+
+    # =================== WeidSyntara Tool System-Level Registration ===================
+    # Tools with a NOT NULL user_id column must be owned by someone.
+    # The admin user is created/guaranteed to exist early in the Open WebUI lifecycle.
+    log.info("WeidSyntara: Attempting to get admin user for tool loading...")
+    
+    # get_admin_user is a synchronous function that handles creating/retrieving the admin.
+    admin_user = get_admin_user() 
+    
+    if admin_user:
+        admin_user_id = admin_user.id
+        log.info(f"WeidSyntara: Admin user found with ID: {admin_user_id}. Loading custom tools...")
+        try:
+            # Pass the admin_user_id to your tool loader. load_local_tools is synchronous.
+            load_local_tools(app, admin_user_id) 
+            log.info("WeidSyntara: Custom tool loading complete.")
+        except Exception as e:
+            log.error(f"WeidSyntara: CRITICAL ERROR during custom tool loading: {e}", exc_info=True)
+            # You might choose to re-raise 'e' here if tool loading failure should prevent startup.
+    else:
+        log.error("WeidSyntara: CRITICAL ERROR: Admin user not found during lifespan. Custom tools might not be registered.")
+    # ================= End WeidSyntara Tool Registration =================
 
     app.state.redis = get_redis_connection(
         redis_url=REDIS_URL,
