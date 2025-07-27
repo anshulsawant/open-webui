@@ -25,11 +25,11 @@ from open_webui.env import (
     SRC_LOG_LEVELS,
     WEBUI_AUTH_TRUSTED_EMAIL_HEADER,
 )
+from open_webui.utils.passwords import get_password_hash, verify_password
 
 from fastapi import BackgroundTasks, Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from passlib.context import CryptContext
-
 
 logging.getLogger("passlib").setLevel(logging.ERROR)
 
@@ -112,16 +112,6 @@ def get_license_data(app, key):
 
 bearer_security = HTTPBearer(auto_error=False)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-
-def verify_password(plain_password, hashed_password):
-    return (
-        pwd_context.verify(plain_password, hashed_password) if hashed_password else None
-    )
-
-
-def get_password_hash(password):
-    return pwd_context.hash(password)
 
 
 def create_token(data: dict, expires_delta: Union[timedelta, None] = None) -> str:

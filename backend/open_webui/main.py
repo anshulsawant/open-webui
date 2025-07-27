@@ -508,82 +508,65 @@ https://github.com/open-webui/open-webui
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.instance_id = INSTANCE_ID
-    start_logger()
+    try:
+        app.state.instance_id = INSTANCE_ID
+        start_logger()
 
-    if RESET_CONFIG_ON_START:
-        reset_config()
+        if RESET_CONFIG_ON_START:
+            reset_config()
 
-    if LICENSE_KEY:
-        get_license_data(app, LICENSE_KEY)
+        if LICENSE_KEY:
+            get_license_data(app, LICENSE_KEY)
 
-    # This should be blocking (sync) so functions are not deactivated on first /get_models calls
-    # when the first user lands on the / route.
-    log.info("Installing external dependencies of functions and tools...")
-    install_tool_and_function_dependencies()
+        # This should be blocking (sync) so functions are not deactivated on first /get_models calls
+        # when the first user lands on the / route.
+        log.info("Installing external dependencies of functions and tools...")
+        install_tool_and_function_dependencies()
 
-    # =================== WeidSyntara Tool System-Level Registration ===================
-    # Tools with a NOT NULL user_id column must be owned by someone.
-    # The admin user is created/guaranteed to exist early in the Open WebUI lifecycle.
-    log.info("WeidSyntara: Attempting to get admin user for tool loading...")
-    
-    # get_admin_user is a synchronous function that handles creating/retrieving the admin.
-    admin_user = get_admin_user() 
-    
-    if admin_user:
-        admin_user_id = admin_user.id
-        log.info(f"WeidSyntara: Admin user found with ID: {admin_user_id}. Loading custom tools...")
-        try:
-            # Pass the admin_user_id to your tool loader. load_local_tools is synchronous.
-            load_local_tools(app, admin_user_id) 
-            log.info("WeidSyntara: Custom tool loading complete.")
-        except Exception as e:
-            log.error(f"WeidSyntara: CRITICAL ERROR during custom tool loading: {e}", exc_info=True)
-            # You might choose to re-raise 'e' here if tool loading failure should prevent startup.
-    else:
-        log.error("WeidSyntara: CRITICAL ERROR: Admin user not found during lifespan. Custom tools might not be registered.")
-    # ================= End WeidSyntara Tool Registration =================
-
-    app.state.redis = get_redis_connection(
-        redis_url=REDIS_URL,
-        redis_sentinels=get_sentinels_from_env(
-            REDIS_SENTINEL_HOSTS, REDIS_SENTINEL_PORT
-        ),
-        async_mode=True,
-    )
-
-    if app.state.redis is not None:
-        app.state.redis_task_command_listener = asyncio.create_task(
-            redis_task_command_listener(app)
-        )
-
-    if THREAD_POOL_SIZE and THREAD_POOL_SIZE > 0:
-        limiter = anyio.to_thread.current_default_thread_limiter()
-        limiter.total_tokens = THREAD_POOL_SIZE
-
-    asyncio.create_task(periodic_usage_pool_cleanup())
-
-    if app.state.config.ENABLE_BASE_MODELS_CACHE:
-        await get_all_models(
-            Request(
-                # Creating a mock request object to pass to get_all_models
-                {
-                    "type": "http",
-                    "asgi.version": "3.0",
-                    "asgi.spec_version": "2.0",
-                    "method": "GET",
-                    "path": "/internal",
-                    "query_string": b"",
-                    "headers": Headers({}).raw,
-                    "client": ("127.0.0.1", 12345),
-                    "server": ("127.0.0.1", 80),
-                    "scheme": "http",
-                    "app": app,
-                }
+        app.state.redis = get_redis_connection(
+            redis_url=REDIS_URL,
+            redis_sentinels=get_sentinels_from_env(
+                REDIS_SENTINEL_HOSTS, REDIS_SENTINEL_PORT
             ),
-            None,
+            async_mode=True,
         )
 
+        if app.state.redis is not None:
+            app.state.redis_task_command_listener = asyncio.create_task(
+                redis_task_command_listener(app)
+            )
+
+        if THREAD_POOL_SIZE and THREAD_POOL_SIZE > 0:
+            limiter = anyio.to_thread.current_default_thread_limiter()
+            limiter.total_tokens = THREAD_POOL_SIZE
+
+        asyncio.create_task(periodic_usage_pool_cleanup())
+
+        if app.state.config.ENABLE_BASE_MODELS_CACHE:
+            await get_all_models(
+                Request(
+                    # Creating a mock request object to pass to get_all_models
+                    {
+                        "type": "http",
+                        "asgi.version": "3.0",
+                        "asgi.spec_version": "2.0",
+                        "method": "GET",
+                        "path": "/internal",
+                        "query_string": b"",
+                        "headers": Headers({}).raw,
+                        "client": ("127.0.0.1", 12345),
+                        "server": ("127.0.0.1", 80),
+                        "scheme": "http",
+                        "app": app,
+                    }
+                ),
+                None,
+            )
+
+        load_local_tools(app=app)
+    except Exception as e:
+        log.exception('Error in app start.')
+        raise e
     yield
 
     if hasattr(app.state, "redis_task_command_listener"):
@@ -1878,3 +1861,27 @@ else:
     log.warning(
         f"Frontend build directory not found at '{FRONTEND_BUILD_DIR}'. Serving API only."
     )
+
+
+@app.on_event("startup")
+async def startup_load_weidsyntara_tools():
+    """
+    Scans for and loads custom tools from the WeidSyntara directory on application startup.
+    """
+    log.info("WeidSyntara: Attempting to load custom tools...")
+    db = SessionLocal()
+    try:
+        # In auth-free mode, Open WebUI creates a default user. We need to assign
+        # the tools to this user. We'll grab the first user found.
+        user = db.query(User).first()
+        if user:
+            log.info(f"WeidSyntara: Found default user with ID '{user.id}' to own tools.")
+            # Pass the FastAPI app instance and the user ID to the loader
+            load_local_tools(app=app, owner_user_id=user.id)
+            log.info("WeidSyntara: Custom tool loading process completed.")
+        else:
+            log.warning("WeidSyntara: Could not find a default user to assign tools to. Skipping tool loading.")
+    except Exception as e:
+        log.error(f"WeidSyntara: An error occurred during custom tool loading: {e}")
+    finally:
+        db.close()

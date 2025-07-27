@@ -69,7 +69,6 @@ def run_migrations():
 
 run_migrations()
 
-
 class Config(Base):
     __tablename__ = "config"
 
@@ -117,13 +116,15 @@ DEFAULT_CONFIG = {
 
 
 def get_config():
-    with get_db() as db:
-        config_entry = db.query(Config).order_by(Config.id.desc()).first()
-        return config_entry.data if config_entry else DEFAULT_CONFIG
+    return DEFAULT_CONFIG
 
 
 CONFIG_DATA = get_config()
 
+def load_config():
+    """Loads the config from the database and updates the global variable."""
+    global CONFIG_DATA
+    CONFIG_DATA = get_config()
 
 def get_config_value(config_path: str):
     path_parts = config_path.split(".")

@@ -45,9 +45,9 @@ from open_webui.utils.auth import (
     get_admin_user,
     get_verified_user,
     get_current_user,
-    get_password_hash,
     get_http_authorization_cred,
 )
+from open_webui.utils.passwords import get_password_hash
 from open_webui.utils.webhook import post_webhook
 from open_webui.utils.access_control import get_permissions
 

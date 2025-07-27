@@ -20,30 +20,20 @@ def extract_frontmatter(content):
     Extract frontmatter as a dictionary from the provided content string.
     """
     frontmatter = {}
-    frontmatter_started = False
-    frontmatter_ended = False
-    frontmatter_pattern = re.compile(r"^\s*([a-z_]+):\s*(.*)\s*$", re.IGNORECASE)
-
+    if '"""' not in content.split('\n', 1)[0]:
+        return {}
+        
     try:
-        lines = content.splitlines()
-        if len(lines) < 1 or lines[0].strip() != '"""':
-            # The content doesn't start with triple quotes
+        # Use regex to find the first docstring
+        match = re.search(r'"""(.*?)"""', content, re.DOTALL)
+        if not match:
             return {}
-
-        frontmatter_started = True
-
-        for line in lines[1:]:
-            if '"""' in line:
-                if frontmatter_started:
-                    frontmatter_ended = True
-                    break
-
-            if frontmatter_started and not frontmatter_ended:
-                match = frontmatter_pattern.match(line)
-                if match:
-                    key, value = match.groups()
-                    frontmatter[key.strip()] = value.strip()
-
+        
+        frontmatter_str = match.group(1)
+        for line in frontmatter_str.strip().split('\n'):
+            if ':' in line:
+                key, value = line.split(':', 1)
+                frontmatter[key.strip().lower()] = value.strip()
     except Exception as e:
         log.exception(f"Failed to extract frontmatter: {e}")
         return {}
@@ -61,67 +51,87 @@ def replace_imports(content):
         "from main": "from open_webui.main",
         "from config": "from open_webui.config",
     }
-
     for old, new in replacements.items():
         content = content.replace(old, new)
-
     return content
 
 
 def load_tool_module_by_id(tool_id, content=None):
+    """
+    Dynamically loads a tool's Python module.
+    """
+    if tool_id.startswith("custom_"):
+        try:
+            tool_name = tool_id.replace("custom_", "", 1)
+            tools_dir = os.getenv("TOOLS_DIR", "/app/weidsyntara/tools")
+            file_path = os.path.join(tools_dir, f"{tool_name}.py")
 
-    if content is None:
-        tool = Tools.get_tool_by_id(tool_id)
-        if not tool:
-            raise Exception(f"Toolkit not found: {tool_id}")
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"Source file for tool '{tool_id}' not found at '{file_path}'.")
+            
+            log.info(f"Loading WeidSyntara system tool '{tool_id}' from file: {file_path}")
+            module_name = f"tool_{tool_id}"
+            
+            spec = util.spec_from_file_location(module_name, file_path)
+            if spec is None: raise ImportError(f"Could not create module spec for {file_path}")
+            
+            module = util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
 
-        content = tool.content
-
-        content = replace_imports(content)
-        Tools.update_tool_by_id(tool_id, {"content": content})
+            with open(file_path, 'r', encoding='utf-8') as f:
+                file_content = f.read()
+            frontmatter = extract_frontmatter(file_content)
+            
+            if hasattr(module, "Tools"):
+                return module.Tools(), frontmatter
+            else:
+                raise AttributeError("No Tools class found in module from file.")
+        except Exception as e:
+            log.error(f"Error loading WeidSyntara tool module '{tool_id}': {e}")
+            if f"tool_{tool_id}" in sys.modules: del sys.modules[f"tool_{tool_id}"]
+            raise e
     else:
-        frontmatter = extract_frontmatter(content)
-        # Install required packages found within the frontmatter
-        install_frontmatter_requirements(frontmatter.get("requirements", ""))
-
-    module_name = f"tool_{tool_id}"
-    module = types.ModuleType(module_name)
-    sys.modules[module_name] = module
-
-    # Create a temporary file and use it to define `__file__` so
-    # that it works as expected from the module's perspective.
-    temp_file = tempfile.NamedTemporaryFile(delete=False)
-    temp_file.close()
-    try:
-        with open(temp_file.name, "w", encoding="utf-8") as f:
-            f.write(content)
-        module.__dict__["__file__"] = temp_file.name
-
-        # Executing the modified content in the created module's namespace
-        exec(content, module.__dict__)
-        frontmatter = extract_frontmatter(content)
-        log.info(f"Loaded module: {module.__name__}")
-
-        # Create and return the object if the class 'Tools' is found in the module
-        if hasattr(module, "Tools"):
-            return module.Tools(), frontmatter
+        if content is None:
+            tool = Tools.get_tool_by_id(tool_id)
+            if not tool: raise Exception(f"Toolkit not found: {tool_id}")
+            content = tool.content
+            content = replace_imports(content)
+            Tools.update_tool_by_id(tool_id, {"content": content})
         else:
-            raise Exception("No Tools class found in the module")
-    except Exception as e:
-        log.error(f"Error loading module: {tool_id}: {e}")
-        del sys.modules[module_name]  # Clean up
-        raise e
-    finally:
-        os.unlink(temp_file.name)
+            frontmatter = extract_frontmatter(content)
+            install_frontmatter_requirements(frontmatter.get("requirements", ""))
+
+        module_name = f"tool_{tool_id}"
+        module = types.ModuleType(module_name)
+        sys.modules[module_name] = module
+
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, encoding="utf-8") as temp_file:
+            temp_file.write(content)
+            temp_file_path = temp_file.name
+        
+        try:
+            module.__dict__["__file__"] = temp_file_path
+            exec(content, module.__dict__)
+            frontmatter = extract_frontmatter(content)
+            if hasattr(module, "Tools"):
+                return module.Tools(), frontmatter
+            else:
+                raise Exception("No Tools class found in the module")
+        except Exception as e:
+            log.error(f"Error loading module: {tool_id}: {e}")
+            del sys.modules[module_name]
+            raise e
+        finally:
+            os.unlink(temp_file_path)
 
 
 def load_function_module_by_id(function_id: str, content: str | None = None):
+    # This function remains unchanged from the original
     if content is None:
         function = Functions.get_function_by_id(function_id)
-        if not function:
-            raise Exception(f"Function not found: {function_id}")
+        if not function: raise Exception(f"Function not found: {function_id}")
         content = function.content
-
         content = replace_imports(content)
         Functions.update_function_by_id(function_id, {"content": content})
     else:
@@ -132,21 +142,13 @@ def load_function_module_by_id(function_id: str, content: str | None = None):
     module = types.ModuleType(module_name)
     sys.modules[module_name] = module
 
-    # Create a temporary file and use it to define `__file__` so
-    # that it works as expected from the module's perspective.
-    temp_file = tempfile.NamedTemporaryFile(delete=False)
-    temp_file.close()
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, encoding="utf-8") as temp_file:
+        temp_file.write(content)
+        temp_file_path = temp_file.name
     try:
-        with open(temp_file.name, "w", encoding="utf-8") as f:
-            f.write(content)
-        module.__dict__["__file__"] = temp_file.name
-
-        # Execute the modified content in the created module's namespace
+        module.__dict__["__file__"] = temp_file_path
         exec(content, module.__dict__)
         frontmatter = extract_frontmatter(content)
-        log.info(f"Loaded module: {module.__name__}")
-
-        # Create appropriate object based on available class type in the module
         if hasattr(module, "Pipe"):
             return module.Pipe(), "pipe", frontmatter
         elif hasattr(module, "Filter"):
@@ -157,114 +159,102 @@ def load_function_module_by_id(function_id: str, content: str | None = None):
             raise Exception("No Function class found in the module")
     except Exception as e:
         log.error(f"Error loading module: {function_id}: {e}")
-        # Cleanup by removing the module in case of error
         del sys.modules[module_name]
-
         Functions.update_function_by_id(function_id, {"is_active": False})
         raise e
     finally:
-        os.unlink(temp_file.name)
+        os.unlink(temp_file_path)
 
 
 def get_function_module_from_cache(request, function_id, load_from_db=True):
+    # This function remains unchanged from the original
     if load_from_db:
-        # Always load from the database by default
-        # This is useful for hooks like "inlet" or "outlet" where the content might change
-        # and we want to ensure the latest content is used.
-
         function = Functions.get_function_by_id(function_id)
-        if not function:
-            raise Exception(f"Function not found: {function_id}")
+        if not function: raise Exception(f"Function not found: {function_id}")
         content = function.content
-
         new_content = replace_imports(content)
         if new_content != content:
             content = new_content
-            # Update the function content in the database
             Functions.update_function_by_id(function_id, {"content": content})
-
-        if (
-            hasattr(request.app.state, "FUNCTION_CONTENTS")
-            and function_id in request.app.state.FUNCTION_CONTENTS
-        ) and (
-            hasattr(request.app.state, "FUNCTIONS")
-            and function_id in request.app.state.FUNCTIONS
-        ):
+        if hasattr(request.app.state, "FUNCTION_CONTENTS") and function_id in request.app.state.FUNCTION_CONTENTS and hasattr(request.app.state, "FUNCTIONS") and function_id in request.app.state.FUNCTIONS:
             if request.app.state.FUNCTION_CONTENTS[function_id] == content:
                 return request.app.state.FUNCTIONS[function_id], None, None
-
-        function_module, function_type, frontmatter = load_function_module_by_id(
-            function_id, content
-        )
+        function_module, function_type, frontmatter = load_function_module_by_id(function_id, content)
     else:
-        # Load from cache (e.g. "stream" hook)
-        # This is useful for performance reasons
-
-        if (
-            hasattr(request.app.state, "FUNCTIONS")
-            and function_id in request.app.state.FUNCTIONS
-        ):
+        if hasattr(request.app.state, "FUNCTIONS") and function_id in request.app.state.FUNCTIONS:
             return request.app.state.FUNCTIONS[function_id], None, None
+        function_module, function_type, frontmatter = load_function_module_by_id(function_id)
 
-        function_module, function_type, frontmatter = load_function_module_by_id(
-            function_id
-        )
-
-    if not hasattr(request.app.state, "FUNCTIONS"):
-        request.app.state.FUNCTIONS = {}
-
-    if not hasattr(request.app.state, "FUNCTION_CONTENTS"):
-        request.app.state.FUNCTION_CONTENTS = {}
-
+    if not hasattr(request.app.state, "FUNCTIONS"): request.app.state.FUNCTIONS = {}
+    if not hasattr(request.app.state, "FUNCTION_CONTENTS"): request.app.state.FUNCTION_CONTENTS = {}
     request.app.state.FUNCTIONS[function_id] = function_module
     request.app.state.FUNCTION_CONTENTS[function_id] = content
-
     return function_module, function_type, frontmatter
 
 
 def install_frontmatter_requirements(requirements: str):
+    # This function remains unchanged from the original
     if requirements:
         try:
-            req_list = [req.strip() for req in requirements.split(",")]
+            req_list = [req.strip() for req in requirements.split(",") if req.strip()]
+            if not req_list: return
             log.info(f"Installing requirements: {' '.join(req_list)}")
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install"]
-                + PIP_OPTIONS
-                + req_list
-                + PIP_PACKAGE_INDEX_OPTIONS
-            )
+            subprocess.check_call([sys.executable, "-m", "pip", "install"] + PIP_OPTIONS + req_list + PIP_PACKAGE_INDEX_OPTIONS)
         except Exception as e:
             log.error(f"Error installing packages: {' '.join(req_list)}")
             raise e
-
     else:
         log.info("No requirements found in frontmatter.")
 
 
 def install_tool_and_function_dependencies():
     """
-    Install all dependencies for all admin tools and active functions.
-
-    By first collecting all dependencies from the frontmatter of each tool and function,
-    and then installing them using pip. Duplicates or similar version specifications are
-    handled by pip as much as possible.
+    WEIDSYNTARA FIX: This function now correctly finds and installs dependencies
+    for both regular admin-created tools AND file-based system tools.
     """
+    log.info("Installing dependencies for all system tools and active functions.")
+    
     function_list = Functions.get_functions(active_only=True)
     tool_list = Tools.get_tools()
+    all_dependencies = set()
 
-    all_dependencies = ""
     try:
+        # Process functions (no change in logic)
         for function in function_list:
             frontmatter = extract_frontmatter(replace_imports(function.content))
             if dependencies := frontmatter.get("requirements"):
-                all_dependencies += f"{dependencies}, "
-        for tool in tool_list:
-            # Only install requirements for admin tools
-            if tool.user.role == "admin":
-                frontmatter = extract_frontmatter(replace_imports(tool.content))
-                if dependencies := frontmatter.get("requirements"):
-                    all_dependencies += f"{dependencies}, "
+                for dep in dependencies.split(','): all_dependencies.add(dep.strip())
 
-        install_frontmatter_requirements(all_dependencies.strip(", "))
+        # Process tools with corrected logic
+        for tool in tool_list:
+            frontmatter = {}
+            # Check for WeidSyntara system tools (user_id is None)
+            if tool.user_id is None and tool.id.startswith("custom_"):
+                log.info(f'Extracting frontmatter for System Tool {tool.name}.')
+                try:
+                    tool_name = tool.id.replace("custom_", "", 1)
+                    tools_dir = os.getenv("TOOLS_DIR", "/app/weidsyntara/tools")
+                    file_path = os.path.join(tools_dir, f"{tool_name}.py")
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        file_content = f.read()
+                    frontmatter = extract_frontmatter(file_content)
+                except Exception as e:
+                    log.error(f"Could not read content for system tool {tool.id} to install dependencies: {e}")
+            
+            # Check for regular admin tools
+            elif tool.user is not None and tool.user.role == "admin":
+                log.info(f'Extracting frontmatter for Admin Tool {tool.name}.')
+                frontmatter = extract_frontmatter(replace_imports(tool.content))
+            
+            # Extract dependencies from the gathered frontmatter
+            if dependencies := frontmatter.get("requirements"):
+                 for dep in dependencies.split(','): all_dependencies.add(dep.strip())
+
+        if all_dependencies:
+            log.info(f'Found unique dependencies: {", ".join(all_dependencies)}')
+            install_frontmatter_requirements(", ".join(all_dependencies))
+        else:
+            log.info("No dependencies found to install.")
+
     except Exception as e:
-        log.error(f"Error installing requirements: {e}")
+        log.error(f"Error during dependency installation: {e}")

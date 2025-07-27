@@ -1,34 +1,39 @@
+import logging
 from logging.config import fileConfig
 
-from alembic import context
-from open_webui.models.auths import Auth
-from open_webui.env import DATABASE_URL
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config
+from sqlalchemy import pool
 
-# this is the Alembic Config object, which provides
+from alembic import context
+
+# This is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name, disable_existing_loggers=False)
+    fileConfig(config.config_file_name)
 
-# add your model's MetaData object here
-# for 'autogenerate' support
-# from myapp import mymodel
-# target_metadata = mymodel.Base.metadata
-target_metadata = Auth.metadata
+# --- WeidSyntara/Open-WebUI Customization ---
 
-# other values from the config, defined by the needs of env.py,
-# can be acquired:
-# my_important_option = config.get_main_option("my_important_option")
-# ... etc.
+# 1. Import the central Base from your database setup.
+#    This object contains the metadata for all your models.
+from open_webui.internal.db import Base
 
+# 2. Import the database URL from your application's environment configuration.
+from open_webui.env import DATABASE_URL
+
+# 3. This is the key change: Point Alembic's target to your Base metadata.
+#    This ensures `autogenerate` sees all tables (User, Tool, Chat, etc.).
+target_metadata = Base.metadata
+
+# Set the database URL for Alembic.
 DB_URL = DATABASE_URL
-
 if DB_URL:
     config.set_main_option("sqlalchemy.url", DB_URL.replace("%", "%%"))
+
+# --- End Customization ---
 
 
 def run_migrations_offline() -> None:
